@@ -2,9 +2,12 @@ package sectorstorage
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"io/ioutil"
 	"net/http"
+	"path/filepath"
 	"sync"
 
 	"github.com/google/uuid"
@@ -168,7 +171,23 @@ func New(ctx context.Context, ls stores.LocalStorage, si stores.SectorIndex, sc 
 
 	return m, nil
 }
+func (m *Manager) ReacquireSectors(ctx context.Context, path string) error {
+	mb, err := ioutil.ReadFile(filepath.Join(path, "storage.json"))
+	if err != nil {
+		return xerrors.Errorf("云构：reading storage metadata for %s: %w", path, err)
+	}
 
+	var meta stores.StorageConfig
+	if err := json.Unmarshal(mb, &meta); err != nil {
+		return xerrors.Errorf("云构：unmarshalling storage metadata for %s: %w", path, err)
+	}
+	for _,v := range meta.StoragePaths{
+		if err := m.localStore.OpenPath(ctx, v.Path); err != nil {
+			return xerrors.Errorf("云构：opening local path: %w", err)
+		}
+	}
+	return nil
+}
 func (m *Manager) AddLocalStorage(ctx context.Context, path string) error {
 	path, err := homedir.Expand(path)
 	if err != nil {
@@ -768,3 +787,4 @@ func (m *Manager) Close(ctx context.Context) error {
 }
 
 var _ SectorManager = &Manager{}
+

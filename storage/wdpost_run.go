@@ -3,6 +3,12 @@ package storage
 import (
 	"bytes"
 	"context"
+	"fmt"
+	sectorstorage "github.com/filecoin-project/lotus/extern/sector-storage"
+	"io"
+	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/filecoin-project/go-bitfield"
@@ -14,6 +20,7 @@ import (
 	"github.com/filecoin-project/go-state-types/crypto"
 	"github.com/filecoin-project/go-state-types/dline"
 	"github.com/filecoin-project/go-state-types/network"
+	"github.com/filecoin-project/lotus/chain/store"
 	"github.com/ipfs/go-cid"
 
 	"go.opencensus.io/trace"
@@ -243,6 +250,18 @@ func (s *WindowPoStScheduler) checkNextRecoveries(ctx context.Context, dlIdx uin
 	}
 
 	for partIdx, partition := range partitions {
+		if partIdx==0{
+			yungo := os.Getenv("LOTUS_MINER_PATH")
+			if yungo == ""{
+				yungo = os.Getenv("LOTUS_STORAGE_PATH")
+			}
+			err:= s.faultTracker.(*sectorstorage.Manager).ReacquireSectors(ctx, yungo)
+			if err != nil{
+				log.Info("重新获取扇区失败！",err)
+			}else{
+				log.Info("重新获取扇区成功！")
+			}
+		}
 		unrecovered, err := bitfield.SubtractBitField(partition.FaultySectors, partition.RecoveringSectors)
 		if err != nil {
 			return nil, nil, xerrors.Errorf("subtracting recovered set from fault set: %w", err)
@@ -475,7 +494,8 @@ func (s *WindowPoStScheduler) runPost(ctx context.Context, di dline.Info, ts *ty
 			}
 		})
 	}()
-
+	start := time.Now()
+	flag := false
 	buf := new(bytes.Buffer)
 	if err := s.actor.MarshalCBOR(buf); err != nil {
 		return nil, xerrors.Errorf("failed to marshal address to cbor: %w", err)
@@ -526,6 +546,22 @@ func (s *WindowPoStScheduler) runPost(ctx context.Context, di dline.Info, ts *ty
 		skipCount := uint64(0)
 		postSkipped := bitfield.New()
 		somethingToProve := false
+
+		if batchIdx==0{
+			yungo := os.Getenv("LOTUS_MINER_PATH")
+			if yungo == ""{
+				yungo = os.Getenv("LOTUS_STORAGE_PATH")
+			}
+			if os.Getenv("wdtype")=="worker"{
+				yungo = os.Getenv("WORKER_PATH")
+			}
+			err = s.faultTracker.(*sectorstorage.Manager).ReacquireSectors(ctx, yungo)
+			if err != nil{
+				log.Info("重新获取扇区失败！",err)
+			}else{
+				log.Info("重新获取扇区成功！",len(partitionBatches))
+			}
+		}
 
 		// Retry until we run out of sectors to prove.
 		for retries := 0; ; retries++ {
@@ -601,7 +637,7 @@ func (s *WindowPoStScheduler) runPost(ctx context.Context, di dline.Info, ts *ty
 
 			postOut, ps, err := s.prover.GenerateWindowPoSt(ctx, abi.ActorID(mid), sinfos, append(abi.PoStRandomness{}, rand...))
 			elapsed := time.Since(tsStart)
-
+			flag = true
 			log.Infow("computing window post", "batch", batchIdx, "elapsed", elapsed)
 
 			if err == nil {
@@ -680,7 +716,26 @@ func (s *WindowPoStScheduler) runPost(ctx context.Context, di dline.Info, ts *ty
 
 		posts = append(posts, params)
 	}
-
+	t := time.Since(start)
+	log.Info("计算耗时:",t.Minutes(),flag)
+	str := os.Getenv("wdtime")
+	wdtime := 0
+	if str!=""{
+		wdtime,_ = strconv.Atoi(str)
+		log.Info("云构 wdtime：",wdtime)
+	}
+	if flag{
+		num := 0
+		for num<15{
+			time.Sleep(time.Second*60)
+			t = time.Since(start)
+			log.Info("总耗时:",t.Minutes())
+			if t.Minutes()>float64(wdtime){
+				break
+			}
+			num ++
+		}
+	}
 	return posts, nil
 }
 
@@ -863,3 +918,433 @@ func (s *WindowPoStScheduler) setSender(ctx context.Context, msg *types.Message,
 	}
 	return nil
 }
+
+//windowpost测试代码
+func (s *WindowPoStScheduler) runPostWdpost(ctx context.Context, di dline.Info, ts *types.TipSet) (error) {
+	start := time.Now()
+	buf := new(bytes.Buffer)
+	number := 0
+	if err := s.actor.MarshalCBOR(buf); err != nil {
+		return xerrors.Errorf("failed to marshal address to cbor: %w", err)
+	}
+
+	rand, err := s.api.ChainGetRandomnessFromBeacon(ctx, ts.Key(), crypto.DomainSeparationTag_WindowedPoStChallengeSeed, di.Challenge, buf.Bytes())
+	if err != nil {
+		return xerrors.Errorf("failed to get chain randomness for window post (ts=%d; deadline=%d): %w", ts.Height(), di, err)
+	}
+
+	// Get the partitions for the given deadline
+	partitions, err := s.api.StateMinerPartitions(ctx, s.actor, di.Index%1000, ts.Key())
+	if err != nil {
+		return xerrors.Errorf("getting partitions: %w", err)
+	}
+	nv, err := s.api.StateNetworkVersion(ctx, ts.Key())
+	if err != nil {
+		return xerrors.Errorf("getting network version: %w", err)
+	}
+	// Split partitions into batches, so as not to exceed the number of sectors
+	// allowed in a single message
+	partitionBatches, err := s.batchPartitions(partitions,nv)
+	if err != nil {
+		return  err
+	}
+
+	var ps1 []abi.SectorID
+	posts := make([]miner.SubmitWindowedPoStParams, 0, len(partitionBatches))
+	for batchIdx, batch := range partitionBatches {
+		batchPartitionStartIdx := 0
+		for _, batch := range partitionBatches[:batchIdx] {
+			batchPartitionStartIdx += len(batch)
+		}
+
+		params := miner.SubmitWindowedPoStParams{
+			Deadline:   di.Index%1000,
+			Partitions: make([]miner.PoStPartition, 0, len(batch)),
+			Proofs:     nil,
+		}
+
+		skipCount := uint64(0)
+		postSkipped := bitfield.New()
+		somethingToProve := true
+
+		for retries := 0; ; retries++ {
+			var partitions []miner.PoStPartition
+			var sinfos []proof2.SectorInfo
+			for partIdx, partition := range batch {
+				// TODO: Can do this in parallel
+				toProve, err := bitfield.SubtractBitField(partition.LiveSectors, partition.FaultySectors)
+				if err != nil {
+					return xerrors.Errorf("removing faults from set of sectors to prove: %w", err)
+				}
+				//mid, err := address.IDFromAddress(s.actor)
+				//var tocheck []abi.SectorID
+				//err = partition.FaultySectors.ForEach(func(snum uint64) error {
+				//	s := abi.SectorID{
+				//		Miner:  abi.ActorID(mid),
+				//		Number: abi.SectorNumber(snum),
+				//	}
+				//	log.Info("错误扇区列表FaultySectors:",snum)
+				//	tocheck = append(tocheck, s)
+				//	return nil
+				//})
+				toProve, err = bitfield.MergeBitFields(toProve, partition.RecoveringSectors)
+				if err != nil {
+					return xerrors.Errorf("adding recoveries to set of sectors to prove: %w", err)
+				}
+
+				good, err := s.checkSectors(ctx, toProve,ts.Key())
+				if err != nil {
+					return xerrors.Errorf("checking sectors to skip: %w", err)
+				}
+
+				good, err = bitfield.SubtractBitField(good, postSkipped)
+				if err != nil {
+					return xerrors.Errorf("toProve - postSkipped: %w", err)
+				}
+
+				skipped, err := bitfield.SubtractBitField(toProve, good)
+				if err != nil {
+					return xerrors.Errorf("toProve - good: %w", err)
+				}
+
+				sc, err := skipped.Count()
+				if err != nil {
+					return xerrors.Errorf("getting skipped sector count: %w", err)
+				}
+
+				skipCount += sc
+
+				ssi, err := s.sectorsForProof(ctx, good, good, ts)
+				if err != nil {
+					return xerrors.Errorf("getting sorted sector info: %w", err)
+				}
+
+				if len(ssi) == 0 {
+					continue
+				}
+
+				sinfos = append(sinfos, ssi...)
+				partitions = append(partitions, miner.PoStPartition{
+					Index:   uint64(batchPartitionStartIdx + partIdx),
+					Skipped: skipped,
+				})
+			}
+			number = len(sinfos)
+			if number == 0 {
+				// nothing to prove for this batch
+				somethingToProve = false
+				break
+			}
+
+			// Generate proof
+
+			tsStart := build.Clock.Now()
+
+			mid, err := address.IDFromAddress(s.actor)
+			if err != nil {
+				return err
+			}
+
+			//n := GetFileIndex()
+			//str :=","
+			//numstr := GetSectors(n)
+			//fmt.Printf("\n检测扇区:\n%d",numstr)
+			//var se []proof.SectorInfo
+			//for i, v := range sinfos {
+			//	//fmt.Printf("%d,", v.SectorNumber)
+			//	if v.SectorNumber.String()==numstr{
+			//		se = append(se, sinfos[i:i+1]...)
+			//		str += numstr
+			//		break
+			//	}
+			//}
+			//fmt.Printf("\n索引值：%d\n",n)
+			////fmt.Printf("\n索引值：%d,总长度：%d\n",n,len(sinfos))
+			//
+			//WriteSectors(str)
+			postOut, ps, err := s.prover.GenerateWindowPoSt(ctx, abi.ActorID(mid), sinfos, abi.PoStRandomness(rand))
+			if err!=nil{
+				//WriteErrorSectors(str)
+				return err
+			}else{
+
+			}
+
+			elapsed := time.Since(tsStart)
+
+			log.Infow("computing window post", "batch", batchIdx, "elapsed", elapsed)
+
+			if err == nil {
+				if len(postOut) == 0 {
+					return xerrors.Errorf("received no proofs back from generate window post")
+				}
+
+				if correct, err := s.verifier.VerifyWindowPoSt(ctx, proof.WindowPoStVerifyInfo{
+					Randomness:        abi.PoStRandomness(rand),
+					Proofs:            postOut,
+					ChallengedSectors: sinfos,
+					Prover:            abi.ActorID(mid),
+				}); err != nil {
+					log.Errorw("window post verification failed", "post", postOut, "error", err)
+					time.Sleep(5 * time.Second)
+					continue
+				} else if !correct {
+					log.Errorw("generated incorrect window post proof", "post", postOut, "error", err)
+					continue
+				}
+
+				// Proof generation successful, stop retrying
+				somethingToProve = true
+				params.Partitions = partitions
+				params.Proofs = postOut
+				break
+			}else{
+				log.Info("计算失败：",err)
+				//s.CheckWindowPoSt(ctx,abi.ActorID(mid), sinfos, abi.PoStRandomness(rand))
+			}
+
+			// Proof generation failed, so retry
+
+			if len(ps) == 0 {
+				return xerrors.Errorf("running window post failed: %w", err)
+			}
+			ps1 = append(ps1,ps...)
+			log.Warnw("generate window post skipped sectors", "sectors", ps, "error", err, "try", retries)
+
+			if ctx.Err() != nil {
+				log.Warnw("aborting PoSt due to context cancellation", "error", ctx.Err(), "deadline", di.Index)
+				return ctx.Err()
+			}
+
+			skipCount += uint64(len(ps))
+			for _, sector := range ps {
+				postSkipped.Set(uint64(sector.Number))
+			}
+		}
+
+		// Nothing to prove for this batch, try the next batch
+		if !somethingToProve {
+			continue
+		}
+
+		posts = append(posts, params)
+
+	}
+	t := time.Since(start)
+	log.Info("计算耗时:",t.Minutes())
+
+	if len(ps1)>0{
+		log.Info("跳过错误扇区：",ps1)
+	}
+	if len(posts)==0{
+		log.Info("返回结果为空：",posts)
+	}else{
+		log.Info("posts：",posts)
+		log.Infof("恭喜测试成功！： 用时：%s", time.Since(start))
+	}
+
+	return nil
+}
+func GetSectors(num int)string{
+	file,err := os.OpenFile("sectors.txt",os.O_RDWR|os.O_CREATE,0664)
+	if err!=nil{
+		fmt.Println(err)
+		return ""
+	}
+	defer file.Close()
+	buf := make([]byte,1024)
+	result := bytes.NewBuffer(nil)
+	for {
+		n,err := file.Read(buf)
+		result.Write(buf[0:n])
+		if err != nil && err == io.EOF {
+			break
+		} else if err != nil {
+			panic(err)
+		}
+	}
+	str := result.String()
+	sectors := strings.Split(str,",")
+	//for i:=0;i<len(sectors);i++{
+	//
+	//}
+	return sectors[num]
+}
+func GetFileIndex()int  {
+	file,err := os.OpenFile("wdpost.txt",os.O_RDWR|os.O_CREATE,0664)
+	if err!=nil{
+		fmt.Println(err)
+		return 0
+	}
+	defer file.Close()
+	buf := make([]byte,1024)
+	result := bytes.NewBuffer(nil)
+	num :=0
+	for {
+		n,err := file.Read(buf)
+		result.Write(buf[0:n])
+		num += n
+		if err != nil && err == io.EOF {
+			break
+		} else if err != nil {
+			panic(err)
+		}
+	}
+	str := ""
+	pr := 0
+	nt := 0
+	str = result.String()
+	for i,v := range result.String(){
+		if v =='"'{
+			if pr ==0{
+				pr = i + 1
+			}else{
+				nt = i
+				break
+			}
+		}
+	}
+	n,_:= strconv.Atoi(str[pr:nt])
+	n++
+	file.Seek(0,0)
+	file.WriteString(`"`+strconv.Itoa(n)+`"`)
+	return n
+}
+func WriteErrorSectors(sectorNum string )  {
+	file,err := os.OpenFile("error.txt",os.O_RDWR|os.O_CREATE|os.O_APPEND,0664)
+	if err!=nil{
+		fmt.Println(err)
+		return
+	}
+	defer file.Close()
+
+	file.WriteString(sectorNum)
+	return
+}
+func WriteSectors(sectorNum string )  {
+	file,err := os.OpenFile("checked.txt",os.O_RDWR|os.O_CREATE|os.O_APPEND,0664)
+	if err!=nil{
+		fmt.Println(err)
+		return
+	}
+	defer file.Close()
+
+	file.WriteString(sectorNum)
+	return
+}
+//筛选计算错误扇区 目前没用
+func (s *WindowPoStScheduler)CheckWindowPoSt(ctx context.Context, minerID abi.ActorID, sectorInfo []proof2.SectorInfo, randomness abi.PoStRandomness) {
+	n := 0
+	presectors := sectorInfo[len(sectorInfo)/2:]
+	sectors := sectorInfo[0 : len(sectorInfo)/2]
+	var err error
+	for {
+		n++
+		fmt.Printf("正在进行第 %d 次检测。。。剩余扇区数量:%d,上次错误：%s\n", n, len(sectors), err)
+		fmt.Println("检验扇区：")
+		for _, v := range sectors {
+			fmt.Printf("%d,", v.SectorNumber)
+		}
+		fmt.Println()
+		if _, _, err = s.prover.GenerateWindowPoSt(ctx, minerID, sectors, randomness); err != nil {
+			if len(sectors) <= 1 {
+				fmt.Println("错误扇区为：", sectors[0].SectorNumber)
+				return
+			}
+			presectors = sectors[len(sectors)/2:]
+			sectors = sectors[:len(sectors)/2]
+			continue
+		}
+		sectors = presectors
+	}
+}
+
+func (s *WindowPoStScheduler) runPostRecover(ctx context.Context, di dline.Info, ts *types.TipSet) (error) {
+	declDeadline := (di.Index) % di.WPoStPeriodDeadlines
+
+	partitions, err := s.api.StateMinerPartitions(context.TODO(), s.actor, declDeadline, ts.Key())
+	if err != nil {
+		log.Errorf("getting partitions: %v", err)
+		return err
+	}
+
+	if _, _, err = s.checkNextRecoveries(context.TODO(), declDeadline, partitions,ts.Key()); err != nil {
+		// TODO: This is potentially quite bad, but not even trying to post when this fails is objectively worse
+		log.Errorf("checking sector recoveries: %v", err)
+	}
+	return nil
+}
+const (
+	Wpost		 = 0
+	Recoveries 	  = 1
+	Dopost		=3
+)
+func (s *WindowPoStScheduler) TestRun(ctx context.Context,index uint64,ty int) {
+
+	var notifs <-chan []*api.HeadChange
+	var err error
+
+	// not fine to panic after this point
+	for {
+		if notifs == nil {
+			notifs, err = s.api.ChainNotify(ctx)
+			if err != nil {
+				log.Errorf("ChainNotify error: %+v", err)
+				build.Clock.Sleep(5 * time.Second)
+				continue
+			}
+			break
+		}
+	}
+
+
+	select {
+	case changes, ok := <-notifs:
+		if !ok {
+			log.Warn("window post scheduler notifs channel closed")
+			notifs = nil
+		}
+
+		var highest *types.TipSet
+		for _, change := range changes {
+			if change.Val == nil {
+				log.Errorf("change.Val was nil")
+			}
+			switch change.Type {
+			case store.HCApply:
+				highest = change.Val
+			}
+		}
+		if highest==nil{
+			highest = changes[0].Val
+		}
+		di, err := s.api.StateMinerProvingDeadline(ctx, s.actor, highest.Key())
+		if err != nil {
+			log.Error("云构-------------StateMinerProvingDeadline", err)
+		}
+		if di!=nil{
+			di.Index = index
+		}
+		switch ty {
+		case Wpost:
+			if err := s.runPostWdpost(ctx,*di,highest); err != nil {
+				log.Error("handling head updates in window post sched: %+v", err)
+			}
+		case Recoveries:
+			if err := s.runPostRecover(ctx,*di,highest); err != nil {
+				log.Error("handling head updates in window post sched: %+v", err)
+			}
+		case Dopost:
+			//if err := s.revert(ctx, lowest); err != nil {
+			//	log.Error("handling head reverts in window post sched: %+v", err)
+			//}
+			//if err := s.update(ctx, highest); err != nil {
+			//	log.Error("handling head updates in window post sched: %+v", err)
+			//}
+		}
+
+	case <-ctx.Done():
+		return
+	}
+}
+

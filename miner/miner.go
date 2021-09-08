@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"sync"
+	"os"
 	"time"
 
 	"github.com/filecoin-project/lotus/api/v1api"
@@ -146,6 +147,10 @@ func (m *Miner) Start(_ context.Context) error {
 		return fmt.Errorf("miner already started")
 	}
 	m.stop = make(chan struct{})
+	if os.Getenv("wnpost")=="false"{
+		log.Info("云构 wnpost已关闭")
+		return nil
+	}
 	go m.mine(context.TODO())
 	return nil
 }
@@ -488,7 +493,7 @@ func (m *Miner) mineOne(ctx context.Context, base *MiningBase) (minedBlock *type
 	bvals := mbi.BeaconEntries
 
 	tPowercheck := build.Clock.Now()
-
+	log.Infof("Time delta between now and our mining base: %ds (nulls: %d)", uint64(build.Clock.Now().Unix())-base.TipSet.MinTimestamp(), base.NullRounds)
 	rbase = beaconPrev
 	if len(bvals) > 0 {
 		rbase = bvals[len(bvals)-1]

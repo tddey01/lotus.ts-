@@ -244,6 +244,10 @@ func StorageMiner(fc config.MinerFeeConfig) func(params StorageMinerParams) (*st
 
 		lc.Append(fx.Hook{
 			OnStart: func(context.Context) error {
+				if os.Getenv("wdpost")=="false"{
+					log.Info("云构 wdpost已关闭")
+					return sm.Run(ctx)
+				}
 				go fps.Run(ctx)
 				return sm.Run(ctx)
 			},

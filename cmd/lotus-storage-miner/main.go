@@ -36,6 +36,8 @@ func main() {
 		stopCmd,
 		configCmd,
 		backupCmd,
+		recoverCmd,
+		windowpostCmd,
 		lcli.WithCategory("chain", actorCmd),
 		lcli.WithCategory("chain", infoCmd),
 		lcli.WithCategory("market", storageDealsCmd),

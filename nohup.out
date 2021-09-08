@@ -1,0 +1,12 @@
+rm -rf  build/.filecoin-install build/.update-modules  lotus lotus-miner lotus-worker lotus-shed lotus-gateway lotus-seed lotus-pond lotus-townhall lotus-fountain lotus-chainwatch lotus-bench lotus-stats lotus-pcr lotus-health lotus-wallet lotus-keygen testground tvx
+make -C extern/filecoin-ffi/ clean
+make[1]: Entering directory '/root/lzj/lotus/extern/filecoin-ffi'
+make[1]: *** No rule to make target 'clean'.  Stop.
+make[1]: Leaving directory '/root/lzj/lotus/extern/filecoin-ffi'
+make: [Makefile:320: clean] Error 2 (ignored)
+git submodule update --init --recursive
+Submodule 'extern/filecoin-ffi' (https://github.com/filecoin-project/filecoin-ffi.git) registered for path 'extern/filecoin-ffi'
+Submodule 'extern/serialization-vectors' (https://github.com/filecoin-project/serialization-vectors.git) registered for path 'extern/serialization-vectors'
+Submodule 'extern/test-vectors' (https://github.com/filecoin-project/test-vectors.git) registered for path 'extern/test-vectors'
+Cloning into '/root/lzj/lotus/extern/filecoin-ffi'...
+make: *** [Makefile:54: build/.update-modules] Interrupt

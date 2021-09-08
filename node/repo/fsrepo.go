@@ -36,10 +36,14 @@ const (
 	fsAPIToken      = "token"
 	fsConfig        = "config.toml"
 	fsStorageConfig = "storage.json"
-	fsDatastore     = "datastore"
+	//fsDatastore     = "datastore"
 	fsLock          = "repo.lock"
 	fsKeystore      = "keystore"
 )
+var fsDatastore     = "datastore"
+func SetFsDatastore(str string){
+	fsDatastore = str
+}
 
 type RepoType int
 
@@ -90,7 +94,14 @@ func NewFS(path string) (*FsRepo, error) {
 		configPath: filepath.Join(path, fsConfig),
 	}, nil
 }
-
+func (fsr *FsRepo)NoLock(repoType RepoType)(LockedRepo, error){
+	return &fsLockedRepo{
+		path:     fsr.path,
+		configPath: fsr.configPath,
+		repoType: repoType,
+		closer:   nil,
+	}, nil
+}
 func (fsr *FsRepo) SetConfigPath(cfgPath string) {
 	fsr.configPath = cfgPath
 }
@@ -608,3 +619,4 @@ func (fsr *fsLockedRepo) Delete(name string) error {
 	}
 	return nil
 }
+

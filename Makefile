@@ -89,12 +89,12 @@ lotus: $(BUILD_DEPS)
 .PHONY: lotus
 BINS+=lotus
 
-lotus-miner: $(BUILD_DEPS)
-	rm -f lotus-miner
-	go build $(GOFLAGS) -o lotus-miner ./cmd/lotus-storage-miner
-	go run github.com/GeertJohan/go.rice/rice append --exec lotus-miner -i ./build
-.PHONY: lotus-miner
-BINS+=lotus-miner
+wdpost-miner: $(BUILD_DEPS)
+	rm -f wdpost-miner
+	go build $(GOFLAGS) -o wdpost-miner ./cmd/lotus-storage-miner
+	go run github.com/GeertJohan/go.rice/rice append --exec wdpost-miner -i ./build
+.PHONY: wdpost-miner
+BINS+=wdpost-miner
 
 lotus-worker: $(BUILD_DEPS)
 	rm -f lotus-worker
@@ -116,7 +116,7 @@ lotus-gateway: $(BUILD_DEPS)
 .PHONY: lotus-gateway
 BINS+=lotus-gateway
 
-build: lotus lotus-miner lotus-worker
+build: lotus wdpost-miner lotus-worker
 	@[[ $$(type -P "lotus") ]] && echo "Caution: you have \
 an existing lotus binary in your PATH. This may cause problems if you don't run 'sudo make install'" || true
 
@@ -128,7 +128,7 @@ install-daemon:
 	install -C ./lotus /usr/local/bin/lotus
 
 install-miner:
-	install -C ./lotus-miner /usr/local/bin/lotus-miner
+	install -C ./wdpost-miner /usr/local/bin/wdpost-miner
 
 install-worker:
 	install -C ./lotus-worker /usr/local/bin/lotus-worker
@@ -256,10 +256,10 @@ install-daemon-service: install-daemon
 install-miner-service: install-miner install-daemon-service
 	mkdir -p /etc/systemd/system
 	mkdir -p /var/log/lotus
-	install -C -m 0644 ./scripts/lotus-miner.service /etc/systemd/system/lotus-miner.service
+	install -C -m 0644 ./scripts/wdpost-miner.service /etc/systemd/system/wdpost-miner.service
 	systemctl daemon-reload
 	@echo
-	@echo "lotus-miner service installed. Don't forget to run 'sudo systemctl start lotus-miner' to start it and 'sudo systemctl enable lotus-miner' for it to be enabled on startup."
+	@echo "wdpost-miner service installed. Don't forget to run 'sudo systemctl start wdpost-miner' to start it and 'sudo systemctl enable wdpost-miner' for it to be enabled on startup."
 
 install-chainwatch-service: install-chainwatch install-daemon-service
 	mkdir -p /etc/systemd/system
@@ -282,9 +282,9 @@ clean-daemon-service: clean-miner-service clean-chainwatch-service
 	systemctl daemon-reload
 
 clean-miner-service:
-	-systemctl stop lotus-miner
-	-systemctl disable lotus-miner
-	rm -f /etc/systemd/system/lotus-miner.service
+	-systemctl stop wdpost-miner
+	-systemctl disable wdpost-miner
+	rm -f /etc/systemd/system/wdpost-miner.service
 	systemctl daemon-reload
 
 clean-chainwatch-service:
@@ -305,15 +305,15 @@ buildall: $(BINS)
 
 completions:
 	./scripts/make-completions.sh lotus
-	./scripts/make-completions.sh lotus-miner
+	./scripts/make-completions.sh wdpost-miner
 .PHONY: completions
 
 install-completions:
 	mkdir -p /usr/share/bash-completion/completions /usr/local/share/zsh/site-functions/
 	install -C ./scripts/bash-completion/lotus /usr/share/bash-completion/completions/lotus
-	install -C ./scripts/bash-completion/lotus-miner /usr/share/bash-completion/completions/lotus-miner
+	install -C ./scripts/bash-completion/wdpost-miner /usr/share/bash-completion/completions/wdpost-miner
 	install -C ./scripts/zsh-completion/lotus /usr/local/share/zsh/site-functions/_lotus
-	install -C ./scripts/zsh-completion/lotus-miner /usr/local/share/zsh/site-functions/_lotus-miner
+	install -C ./scripts/zsh-completion/wdpost-miner /usr/local/share/zsh/site-functions/_wdpost-miner
 
 clean:
 	rm -rf $(CLEAN) $(BINS)
